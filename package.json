@@ -1,0 +1,88 @@
+{
+  "name": "@skyrocks/dsh-db",
+  "version": "0.1.0",
+  "description": "DeepSeek Harness plugin: 多数据源数据库查询（海量 Vastbase / openGauss、PostgreSQL、MySQL、SQLite）；设置页里增删改，默认只读，写入逐条审批",
+  "license": "MIT",
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./typert": "./typert.host.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "service.js",
+    "tools.js",
+    "store.js",
+    "drivers.js",
+    "sqlguard.js",
+    "client.js",
+    "typert.host.js",
+    "cordis.patch.yml",
+    "README.md",
+    "README.en.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "docs",
+    "icon.svg",
+    "locale/*.json",
+    "test"
+  ],
+  "engines": {
+    "node": ">=18",
+    "dsh": ">=0.2.1-rc.2 <0.3.0"
+  },
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-api-gateway",
+        "@deepseek-ai/dsh-api-remotes"
+      ]
+    }
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.19.0",
+    "mysql2": "^3.11.0",
+    "opengauss.js": "^1.2.2"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "database",
+    "opengauss",
+    "vastbase",
+    "postgresql",
+    "mysql",
+    "sqlite"
+  ],
+  "peerDependencies": {
+    "react": "^18.2.0",
+    "@deepseek-ai/cordis": "~4.0.5",
+    "@deepseek-ai/dsh-typert-protocol": "0.2.2-rc.2"
+  },
+  "author": "skyrocks (https://github.com/skyrocks)",
+  "scripts": {
+    "test": "node test/smoke.mjs && node test/plugin.mjs"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/skyrocks/dsh-db.git"
+  },
+  "homepage": "https://github.com/skyrocks/dsh-db#readme",
+  "bugs": {
+    "url": "https://github.com/skyrocks/dsh-db/issues"
+  }
+}

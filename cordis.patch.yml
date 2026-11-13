@@ -1,0 +1,6 @@
+# dsh-db 插件行：作为 bundle patch 自动注入 profile 组合。
+# 数据源不在这里配：装好后到「设置 → 数据库」里添加，存 $DSH_HOME/db/sources.json，
+# 密码存 DSH 凭据库。
+- insert:
+    - id: dsh-db
+      name: "@skyrocks/dsh-db"

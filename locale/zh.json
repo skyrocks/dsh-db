@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "数据库",
+    "description": "多数据源数据库查询：海量 Vastbase / openGauss、PostgreSQL、MySQL、SQLite。在设置里增删改数据源；默认只读，写入逐条请求授权。",
+    "detail": "docs/DETAIL.md"
+  }
+}
