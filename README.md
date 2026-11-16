@@ -1,5 +1,8 @@
 # dsh-db
 
+[![CI](https://github.com/skyrocks/dsh-db/actions/workflows/ci.yml/badge.svg)](https://github.com/skyrocks/dsh-db/actions/workflows/ci.yml)
+![license](https://img.shields.io/badge/license-MIT-blue.svg)
+
 DeepSeek Harness 插件：**多数据源**数据库查询。在「设置 → 数据库」里添加、编辑、删除数据源，模型通过工具直接用它们；默认只读，写入逐条问你。
 
 支持 **海量 Vastbase / openGauss**、PostgreSQL、MySQL、SQLite。

@@ -1,5 +1,8 @@
 # dsh-db
 
+[![CI](https://github.com/skyrocks/dsh-db/actions/workflows/ci.yml/badge.svg)](https://github.com/skyrocks/dsh-db/actions/workflows/ci.yml)
+![license](https://img.shields.io/badge/license-MIT-blue.svg)
+
 A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`) plugin for **multi-source database queries**. Add, edit, and remove data sources under **Settings → Databases**; the model then queries them through tools. Read-only by default, every write asks you first.
 
 Speaks **Vastbase / openGauss**, PostgreSQL, MySQL, and SQLite.
