@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.2
+
+把「查询路径只读」从「尽力而为」改成「要么只读、要么拒绝」。
+
+- PostgreSQL / openGauss 先用 `SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY`，
+  失败再试 `SET default_transaction_read_only = on`；两种都不认就**断开连接并拒绝查询**，
+  不再退回「仅靠语句闸门」。
+- MySQL 同理：`SET SESSION TRANSACTION READ ONLY` → `transaction_read_only = 1` → 拒绝。
+- 错误文案说明是「无法建立只读会话」，便于区分「服务端太老」和「SQL 越界」。
+
 ## 0.1.1
 
 安全修复（审阅反馈）：`db_query` 曾在可写数据源上复用写连接，能执行改状态的 `PRAGMA`

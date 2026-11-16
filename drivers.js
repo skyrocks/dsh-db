@@ -265,6 +265,35 @@ function withTimeout(promise, timeoutMs, label) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer))
 }
 
+/**
+ * 把会话切到只读。两种等价写法都试一遍；都失败就断开连接并拒绝查询——
+ * 查询路径宁可报错，也不能在没有数据库级只读保护的情况下跑。
+ * @param {object} client - 已连接的客户端。
+ * @param {string[]} statements - 依次尝试的 SET 语句。
+ * @returns {Promise<void>}
+ */
+async function requireReadOnlySession(client, statements) {
+  const failures = []
+  for (const statement of statements) {
+    try {
+      await client.query(statement)
+      return
+    } catch (error) {
+      failures.push(`${statement} → ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+  try {
+    if (typeof client.end === 'function') await client.end()
+    else if (typeof client.close === 'function') client.close()
+  } catch {
+    // 关不掉也不影响结论
+  }
+  throw new Error(
+    '无法把连接切到只读会话，已拒绝执行查询（查询路径必须由数据库保证只读）：'
+    + failures.join('；'),
+  )
+}
+
 async function openPostgresLike(spec, password, timeoutMs, readOnly) {
   const { Client } = require('opengauss.js')
   const options = {
@@ -290,11 +319,10 @@ async function openPostgresLike(spec, password, timeoutMs, readOnly) {
     // 老版本可能不认，不影响查询
   }
   if (readOnly === true) {
-    try {
-      await client.query('SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY')
-    } catch {
-      // 服务端不支持时，只读仍由 SQL 闸门把关
-    }
+    await requireReadOnlySession(client, [
+      'SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY',
+      'SET default_transaction_read_only = on',
+    ])
   }
   return client
 }
@@ -316,11 +344,10 @@ async function openMysql(spec, password, timeoutMs, readOnly) {
     '连接',
   )
   if (readOnly === true) {
-    try {
-      await connection.query('SET SESSION TRANSACTION READ ONLY')
-    } catch {
-      // 5.6 以下不支持
-    }
+    await requireReadOnlySession(connection, [
+      'SET SESSION TRANSACTION READ ONLY',
+      'SET SESSION transaction_read_only = 1',
+    ])
   }
   return connection
 }
