@@ -61,6 +61,9 @@ async function makeService() {
   }
 }
 
+/** 每个用例建的服务，收尾统一 dispose：Windows 上没关的 SQLite 句柄会让 rmSync 报 EPERM。 */
+const opened = []
+
 /** 假 ctx：记录注册的工具，按需提供 approval 服务。 */
 async function makeContext({ approvalOutcome = 'allowed-once', withApproval = true } = {}) {
   const service = await makeService()
@@ -81,6 +84,7 @@ async function makeContext({ approvalOutcome = 'allowed-once', withApproval = tr
     },
   }
   registerTools(ctx, service)
+  opened.push(service)
   return { tools, asked, service }
 }
 
@@ -228,7 +232,18 @@ await check('凭据键名可预测且是合法标识符', () => {
   assert.match(secretRefFor('a_b-1'), /^[A-Za-z_][A-Za-z0-9_]*$/)
 })
 
-rmSync(dir, { recursive: true, force: true })
+for (const service of opened) {
+  try {
+    await service.dispose()
+  } catch {
+    // 清理失败不影响结论
+  }
+}
+try {
+  rmSync(dir, { recursive: true, force: true })
+} catch {
+  // Windows 上偶发 EPERM（文件句柄尚未释放）；临时目录留着无妨
+}
 
 console.log(`\n${passed} passed, ${failed} failed`)
 if (failed > 0) process.exitCode = 1
