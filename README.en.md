@@ -48,8 +48,8 @@ Every result also echoes the SQL that actually ran.
 
 Three layers; any one of them refuses, so the call fails:
 
-1. **Statement gate** (`sqlguard.js`): only single statements starting with `select / with / show / explain / describe / values / table / pragma`. Comments and string literals are stripped first, so `-- delete` is not a false positive and `with x as (delete …)` cannot slip through.
-2. **Session-level read-only**: `SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY` on connect (MySQL uses `SET SESSION TRANSACTION READ ONLY`, SQLite opens with `mode=ro` plus `PRAGMA query_only`). The database refuses the write, not the plugin.
+1. **Statement gate** (`sqlguard.js`): only single statements starting with `select / with / show / explain / describe / values / table`. Comments and string literals are stripped first, so `-- delete` is not a false positive and `with x as (delete …)` cannot slip through. **`PRAGMA` / `ATTACH` / `DETACH` are refused**: they change database state without going through write approval (`PRAGMA user_version=…`, `journal_mode`, `writable_schema`). Use `db_schema` for structure; SQLite's read-only table functions (`SELECT * FROM pragma_table_info('t')`) still work.
+2. **Session-level read-only**: `db_query` and `db_schema` use a **dedicated read-only connection**, even when the data source itself is writable: `SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY` (MySQL uses `SET SESSION TRANSACTION READ ONLY`, SQLite opens a read-only handle plus `PRAGMA query_only`). The database refuses the write, not the plugin.
 3. **The switch in the UI**: `db_exec` refuses on a read-only source; making it writable is a click only you can make.
 
 ## Why writes need approval

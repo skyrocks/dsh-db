@@ -218,7 +218,8 @@ export function registerTools(ctx, service) {
     name: 'db_query',
     description: [
       '执行一条只读查询（SELECT / WITH / SHOW / EXPLAIN 等），返回表格文本。',
-      '任何数据源上都可以用，但它永远不会写；写操作会被拒绝——需要写入时用 db_exec。',
+      '任何数据源上都可以用，但它永远不会写：即使数据源本身是可写的，这条路径也走独立的只读会话——'
+      + 'PRAGMA / ATTACH 和有副作用的函数（set_config、load_extension 等）一律拒绝。需要写入时用 db_exec。',
       '一次只执行一条语句；结果行数受数据源的 maxRows 限制，超了会明确告诉你还剩多少行。',
       '结果里会带上实际执行的 SQL。回答用户时，必须把这条 SQL 用 \`\`\`sql 代码块放在回答里（多表/多步就逐条列出），不要只在工具卡片里给。',
     ].join(''),

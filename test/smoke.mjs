@@ -122,6 +122,27 @@ await check('未知数据源给出可用列表', async () => {
   await assert.rejects(() => registry.spec('nope'), /当前可用：ro, rw/)
 })
 
+await check('查询路径在可写数据源上也是只读会话', async () => {
+  await assert.rejects(
+    () => registry.query('rw', "INSERT INTO users (name) VALUES ('via-query')"),
+    /readonly|read-only|attempt to write/i,
+  )
+  const after = await registry.query('ro', 'SELECT COUNT(*) AS n FROM users', 10)
+  assert.equal(rowCells(after.rows[0], after.columns)[0], '4', 'db_query 不能写进可写数据源')
+})
+
+await check('PRAGMA 写在查询路径上被数据库拒绝', async () => {
+  await assert.rejects(
+    () => registry.query('rw', 'PRAGMA user_version = 7'),
+    /readonly|read-only|attempt to write/i,
+  )
+})
+
+await check('可写数据源上读仍然可用', async () => {
+  const result = await registry.query('rw', 'SELECT COUNT(*) AS n FROM users', 10)
+  assert.equal(rowCells(result.rows[0], result.columns)[0], '4')
+})
+
 await registry.closeAll()
 rmSync(dir, { recursive: true, force: true })
 

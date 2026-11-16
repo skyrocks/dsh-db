@@ -26,4 +26,6 @@ jobs:
             node --check "$f"
           done
       - name: Run tests
-        run: node test/smoke.mjs
+        run: |
+          node test/smoke.mjs
+          node test/plugin.mjs

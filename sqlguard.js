@@ -7,8 +7,12 @@
 // 字面量里的分号被当成多语句），再在剩下的骨架上判断。
 
 const READ_KEYWORDS = new Set([
-  'select', 'with', 'show', 'explain', 'describe', 'desc', 'values', 'table', 'pragma',
+  'select', 'with', 'show', 'explain', 'describe', 'desc', 'values', 'table',
 ])
+
+// 需要点名拦掉的语句形态：PRAGMA 能改库头（user_version / journal_mode / writable_schema），
+// 只读会话挡得住写文件，但明确拒绝更清楚，也挡住「先改成可写再写」的尝试。
+const BLOCKED_STATEMENTS = new Set(['pragma', 'attach', 'detach'])
 
 // 只读连接里出现这些词就拒绝。宁可错杀：模型改一句 SQL 的成本，远低于
 // 在生产库上误写一笔数据的成本。
@@ -20,6 +24,9 @@ const WRITE_KEYWORDS = [
   'begin', 'start', 'commit', 'rollback', 'savepoint', 'release', 'prepare', 'execute',
   'deallocate', 'declare', 'fetch', 'move',
   'into', 'nextval', 'setval', 'pg_terminate_backend', 'pg_cancel_backend',
+  // 有副作用的函数：写配置、拿咨询锁、加载扩展、改 schema 版本
+  'set_config', 'pg_advisory_lock', 'pg_advisory_unlock', 'load_extension', 'writable_schema',
+  'get_lock', 'release_lock', 'checkpoint',
 ]
 
 /**
@@ -133,6 +140,12 @@ export function firstKeywordOf(sql, tool) {
  */
 export function assertReadable(sql, tool) {
   const keyword = firstKeywordOf(sql, tool)
+  if (BLOCKED_STATEMENTS.has(keyword)) {
+    throw new Error(
+      `${tool}: 不接受 ${keyword.toUpperCase()} 语句——它可以修改数据库状态，绕开写入审批。`
+      + ' 读结构请用 db_schema；SQLite 的只读表函数（如 SELECT * FROM pragma_table_info(\'t\')）仍可用。',
+    )
+  }
   if (!READ_KEYWORDS.has(keyword)) {
     throw new Error(
       `${tool}: 只读连接不接受 \`${keyword || '?'}\` 开头的语句；`

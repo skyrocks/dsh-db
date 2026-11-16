@@ -71,8 +71,13 @@ export function rowCells(row, columns) {
  * 单条连接上不做并发——数据库侧本来就是串行处理，串行能保证只读会话设置生效。
  */
 class Entry {
-  constructor(spec) {
+  /**
+   * @param {object} spec - 数据源定义。
+   * @param {boolean} readOnly - 这条连接是否强制只读会话（查询路径永远为 true）。
+   */
+  constructor(spec, readOnly) {
     this.spec = spec
+    this.readOnly = readOnly === true
     this.client = null
     this.queue = Promise.resolve()
     this.password = ''
@@ -137,18 +142,24 @@ export class Registry {
 
   /** 数据源被编辑或删除后调用：丢掉旧连接，下次按新配置重连。 */
   async invalidate(id) {
-    const entry = this.entries.get(id)
-    if (entry === undefined) return
-    this.entries.delete(id)
-    await entry.close()
+    for (const [key, entry] of [...this.entries]) {
+      if (key !== `${id}|ro` && key !== `${id}|rw`) continue
+      this.entries.delete(key)
+      await entry.close()
+    }
   }
 
-  async entryFor(spec) {
-    let entry = this.entries.get(spec.id)
+  /**
+   * 取一条连接。读写两条分开缓存：查询路径永远用只读连接，
+   * 这样即使数据源本身是可写的，db_query 也绕不过数据库的只读保护。
+   */
+  async entryFor(spec, readOnly) {
+    const key = `${spec.id}|${readOnly === true ? 'ro' : 'rw'}`
+    let entry = this.entries.get(key)
     if (entry === undefined) {
-      entry = new Entry(spec)
+      entry = new Entry(spec, readOnly === true)
       entry.password = spec.dialect === 'sqlite' ? '' : await this.secret(spec)
-      this.entries.set(spec.id, entry)
+      this.entries.set(key, entry)
     }
     return entry
   }
@@ -160,14 +171,14 @@ export class Registry {
     const timeoutMs = spec.timeoutMs
     try {
       if (spec.dialect === 'sqlite') {
-        entry.client = openSqlite(spec)
+        entry.client = openSqlite(spec, entry.readOnly)
         return entry.client
       }
       if (spec.dialect === 'mysql') {
-        entry.client = await openMysql(spec, entry.password, timeoutMs)
+        entry.client = await openMysql(spec, entry.password, timeoutMs, entry.readOnly)
         return entry.client
       }
-      entry.client = await openPostgresLike(spec, entry.password, timeoutMs)
+      entry.client = await openPostgresLike(spec, entry.password, timeoutMs, entry.readOnly)
       return entry.client
     } catch (error) {
       entry.client = null
@@ -181,7 +192,8 @@ export class Registry {
    */
   async query(id, sql, maxRows) {
     const spec = await this.spec(id)
-    const entry = await this.entryFor(spec)
+    // 查询路径强制只读会话：可写数据源也一样，PRAGMA / 写函数在这里由数据库拒绝。
+    const entry = await this.entryFor(spec, true)
     return entry.run(async () => {
       const started = Date.now()
       try {
@@ -202,7 +214,7 @@ export class Registry {
   /** 跑一条写语句，返回影响行数（拿不到就给 null）。 */
   async execute(id, sql) {
     const spec = await this.spec(id)
-    const entry = await this.entryFor(spec)
+    const entry = await this.entryFor(spec, false)
     return entry.run(async () => {
       const started = Date.now()
       try {
@@ -219,7 +231,7 @@ export class Registry {
   /** 列 schema 下的表 / 视图。 */
   async tables(id, schema) {
     const spec = await this.spec(id)
-    const entry = await this.entryFor(spec)
+    const entry = await this.entryFor(spec, true)
     return entry.run(async () => {
       const client = await this.clientOf(entry)
       return { rows: await listTables(spec, client, schema) }
@@ -229,7 +241,7 @@ export class Registry {
   /** 列一张表的字段。 */
   async fields(id, schema, table) {
     const spec = await this.spec(id)
-    const entry = await this.entryFor(spec)
+    const entry = await this.entryFor(spec, true)
     return entry.run(async () => {
       const client = await this.clientOf(entry)
       return { rows: await listFields(spec, client, schema, table) }
@@ -253,7 +265,7 @@ function withTimeout(promise, timeoutMs, label) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer))
 }
 
-async function openPostgresLike(spec, password, timeoutMs) {
+async function openPostgresLike(spec, password, timeoutMs, readOnly) {
   const { Client } = require('opengauss.js')
   const options = {
     host: spec.host,
@@ -277,7 +289,7 @@ async function openPostgresLike(spec, password, timeoutMs) {
   } catch {
     // 老版本可能不认，不影响查询
   }
-  if (spec.mode === 'read') {
+  if (readOnly === true) {
     try {
       await client.query('SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY')
     } catch {
@@ -287,7 +299,7 @@ async function openPostgresLike(spec, password, timeoutMs) {
   return client
 }
 
-async function openMysql(spec, password, timeoutMs) {
+async function openMysql(spec, password, timeoutMs, readOnly) {
   const mysql = require('mysql2/promise')
   const connection = await withTimeout(
     mysql.createConnection({
@@ -303,7 +315,7 @@ async function openMysql(spec, password, timeoutMs) {
     timeoutMs,
     '连接',
   )
-  if (spec.mode === 'read') {
+  if (readOnly === true) {
     try {
       await connection.query('SET SESSION TRANSACTION READ ONLY')
     } catch {
@@ -313,10 +325,10 @@ async function openMysql(spec, password, timeoutMs) {
   return connection
 }
 
-function openSqlite(spec) {
+function openSqlite(spec, readOnly) {
   const { DatabaseSync } = require('node:sqlite')
-  const database = new DatabaseSync(spec.database, { readOnly: spec.mode === 'read' })
-  if (spec.mode === 'read') {
+  const database = new DatabaseSync(spec.database, { readOnly: readOnly === true })
+  if (readOnly === true) {
     try {
       database.exec('PRAGMA query_only = ON')
     } catch {

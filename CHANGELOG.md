@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.1
+
+安全修复（审阅反馈）：`db_query` 曾在可写数据源上复用写连接，能执行改状态的 `PRAGMA`
+（如 `user_version` / `journal_mode`），绕开「写入逐条审批」。
+
+- **查询路径改用独立只读连接**：`db_query` / `db_schema` 现在按 `id|ro` 单独建连，
+  即使数据源是 `mode: write`，连接后也执行会话级只读
+  （PG/openGauss `SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY`、
+  MySQL `SET SESSION TRANSACTION READ ONLY`、SQLite 只读句柄 + `query_only`）。
+  写路径用 `id|rw` 的另一条连接，互不影响。
+- **拦截有副作用的语句**：只读白名单移除 `PRAGMA`，并显式拒绝 `PRAGMA` / `ATTACH` / `DETACH`；
+  关键字扫描补充 `set_config` / `load_extension` / `writable_schema` / `pg_advisory_lock` 等。
+- 测试 +7：查询路径在可写数据源上写不进去、PRAGMA 被数据库拒绝、PRAGMA/函数被闸门拦下。
+
 ## 0.1.0
 
 首个版本。

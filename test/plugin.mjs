@@ -110,6 +110,32 @@ await check('db_query 返回表格文本', async () => {
   assert.equal(value.sql, 'SELECT id, name FROM users ORDER BY id')
 })
 
+await check('db_query 拦下 PRAGMA 与有副作用的函数', async () => {
+  const { tools } = await makeContext()
+  const cases = [
+    'PRAGMA user_version = 7',
+    'PRAGMA journal_mode = DELETE',
+    "SELECT load_extension('/tmp/evil.so')",
+    "SELECT set_config('default_transaction_read_only', 'off', false)",
+    "ATTACH DATABASE '/tmp/x.db' AS x",
+  ]
+  for (const sql of cases) {
+    await assert.rejects(
+      () => tools.get('db_query').execute({ connection: 'ro', sql }, exec),
+      /db_query/,
+      '应当拒绝：' + sql,
+    )
+  }
+})
+
+await check('db_query 在可写数据源上也写不进去', async () => {
+  const { tools } = await makeContext()
+  await assert.rejects(
+    () => tools.get('db_query').execute({ connection: 'rw', sql: "INSERT INTO users (name) VALUES ('x')" }, exec),
+    /只读连接不接受/,
+  )
+})
+
 await check('db_query 拒绝写语句', async () => {
   const { tools } = await makeContext()
   await assert.rejects(
