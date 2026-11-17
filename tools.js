@@ -21,6 +21,7 @@ const DIALECT_LABEL = {
   opengauss: '海量/openGauss',
   postgres: 'PostgreSQL',
   mysql: 'MySQL',
+  dameng: '达梦 DM8',
   sqlite: 'SQLite',
 }
 

@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "Databases",
-    "description": "Multi-source database queries: Vastbase / openGauss, PostgreSQL, MySQL, SQLite. Add, edit, and remove data sources in Settings; read-only by default, every write asks for approval.",
+    "description": "Multi-source database queries: Vastbase / openGauss, Dameng DM8, PostgreSQL, MySQL, SQLite. Add, edit, and remove data sources in Settings; read-only by default, every write asks for approval.",
     "detail": "docs/DETAIL.md"
   }
 }

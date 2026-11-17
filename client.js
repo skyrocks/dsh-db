@@ -61,6 +61,7 @@ window.__ModuleLoader__.load({
       { value: "opengauss", label: "海量 Vastbase / openGauss", port: 5432 },
       { value: "postgres", label: "PostgreSQL", port: 5432 },
       { value: "mysql", label: "MySQL / MariaDB", port: 3306 },
+      { value: "dameng", label: "达梦 DM8", port: 5236 },
       { value: "sqlite", label: "SQLite 文件", port: 0 }
     ];
 

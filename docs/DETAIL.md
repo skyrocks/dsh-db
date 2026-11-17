@@ -4,7 +4,7 @@
 
 ## 支持
 
-海量 Vastbase / openGauss、PostgreSQL、MySQL、SQLite。
+海量 Vastbase / openGauss、达梦 DM8、PostgreSQL、MySQL、SQLite。
 
 海量默认 `sha256` 认证，原版 `pg` 连不上；这里用 `opengauss.js`
 （基于 node-postgres 8.22 与官方 `openGauss-connector-nodejs`），支持 sha256 与 SM3。

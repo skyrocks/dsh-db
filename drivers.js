@@ -29,6 +29,7 @@ const DRIVER_PACKAGE = {
   opengauss: 'opengauss.js',
   postgres: 'opengauss.js',
   mysql: 'mysql2',
+  dameng: 'dmdb',
   sqlite: null,
 }
 
@@ -95,7 +96,7 @@ class Entry {
     this.client = null
     if (client === null) return
     try {
-      if (typeof client.close === 'function') client.close()
+      if (typeof client.close === 'function') await client.close()
       else if (typeof client.end === 'function') await client.end()
     } catch {
       // 关闭失败不影响主流程
@@ -178,6 +179,10 @@ export class Registry {
         entry.client = await openMysql(spec, entry.password, timeoutMs, entry.readOnly)
         return entry.client
       }
+      if (spec.dialect === 'dameng') {
+        entry.client = await openDameng(spec, entry.password, timeoutMs, entry.readOnly)
+        return entry.client
+      }
       entry.client = await openPostgresLike(spec, entry.password, timeoutMs, entry.readOnly)
       return entry.client
     } catch (error) {
@@ -198,7 +203,7 @@ export class Registry {
       const started = Date.now()
       try {
         const client = await this.clientOf(entry)
-        const result = await queryClient(spec, client, sql, maxRows, spec.timeoutMs)
+        const result = await queryClient(spec, client, sql, maxRows, spec.timeoutMs, entry.readOnly)
         return { ...result, elapsedMs: Date.now() - started }
       } catch (error) {
         // 语句级错误不等于连接坏；但超时/网络错误后连接不可信，丢掉重连。
@@ -294,6 +299,76 @@ async function requireReadOnlySession(client, statements) {
   )
 }
 
+/** 达梦：官方 dmdb 驱动（纯 JS，oracledb 风格 API）。 */
+async function openDameng(spec, password, timeoutMs, readOnly) {
+  const dmdb = require('dmdb')
+  return withTimeout(
+    dmdb.getConnection({
+      user: spec.user,
+      password,
+      connectString: `${spec.host}:${spec.port}`,
+      // 只读连接关掉自动提交：每条查询自己包一个只读事务，查完回滚。
+      autoCommit: readOnly !== true,
+      connectTimeout: timeoutMs,
+      socketTimeout: Math.max(1000, spec.timeoutMs),
+    }),
+    timeoutMs,
+    '连接',
+  )
+}
+
+/**
+ * 达梦执行一条语句。只读模式下先开 READ ONLY 事务，查完无论成败都回滚，
+ * 保证这条路径改不动数据；开不起来就抛错（fail closed）。
+ */
+async function damengRun(client, sql, params, options = {}) {
+  const { readOnly = false, timeoutMs = 0, maxRows } = options
+  if (readOnly === true) {
+    try {
+      await client.execute('SET TRANSACTION READ ONLY')
+    } catch (error) {
+      throw new Error(
+        '无法把达梦连接切到只读事务，已拒绝执行查询：'
+        + (error instanceof Error ? error.message : String(error)),
+      )
+    }
+  }
+  try {
+    const executeOptions = {}
+    if (Number.isFinite(maxRows) && maxRows > 0) executeOptions.maxRows = maxRows
+    const pending = params.length > 0 || Object.keys(executeOptions).length > 0
+      ? client.execute(sql, params, executeOptions)
+      : client.execute(sql)
+    return timeoutMs > 0 ? await withTimeout(pending, timeoutMs, '查询') : await pending
+  } finally {
+    if (readOnly === true) {
+      try {
+        await client.rollback()
+      } catch {
+        // 事务已经结束或连接已断，忽略
+      }
+    }
+  }
+}
+
+/** dmdb 默认把行返回成数组；列名在 metaData 里。 */
+function damengColumns(result) {
+  const meta = Array.isArray(result === null || result === undefined ? undefined : result.metaData)
+    ? result.metaData
+    : []
+  return meta.map((column) => column.name)
+}
+
+/** 数组行 → 以列名为键的对象行（对象行原样返回）。 */
+function damengRows(result, columns) {
+  const rows = Array.isArray(result === null || result === undefined ? undefined : result.rows)
+    ? result.rows
+    : []
+  return rows.map((row) => (Array.isArray(row)
+    ? Object.fromEntries(columns.map((name, index) => [name, row[index]]))
+    : row))
+}
+
 async function openPostgresLike(spec, password, timeoutMs, readOnly) {
   const { Client } = require('opengauss.js')
   const options = {
@@ -365,8 +440,26 @@ function openSqlite(spec, readOnly) {
   return database
 }
 
-async function queryClient(spec, client, sql, maxRows, timeoutMs) {
-  const wrapped = wrapForLimit(sql, maxRows)
+async function queryClient(spec, client, sql, maxRows, timeoutMs, readOnly) {
+  // 达梦不认 PG/MySQL 的子查询 + LIMIT 包装，行数上限交给驱动（ExecuteOptions.maxRows）。
+  const wrapped = spec.dialect === 'dameng' ? null : wrapForLimit(sql, maxRows)
+
+  if (spec.dialect === 'dameng') {
+    const result = await damengRun(client, sql, [], {
+      readOnly,
+      timeoutMs,
+      maxRows: maxRows + 1,
+    })
+    const columns = damengColumns(result)
+    const rows = damengRows(result, columns)
+    const truncated = rows.length > maxRows
+    return {
+      columns,
+      rows: truncated ? rows.slice(0, maxRows) : rows,
+      truncated,
+      totalRows: rows.length,
+    }
+  }
 
   if (spec.dialect === 'sqlite') {
     const run = (text) => {
@@ -439,6 +532,13 @@ async function queryClient(spec, client, sql, maxRows, timeoutMs) {
 }
 
 async function execClient(spec, client, sql) {
+  if (spec.dialect === 'dameng') {
+    const result = await client.execute(sql)
+    return {
+      affectedRows: typeof result.rowsAffected === 'number' ? result.rowsAffected : null,
+      command: typeof result.sqlType === 'string' ? result.sqlType : '',
+    }
+  }
   if (spec.dialect === 'sqlite') {
     const statement = client.prepare(sql)
     const info = statement.run()
@@ -459,6 +559,23 @@ async function execClient(spec, client, sql) {
 }
 
 async function listTables(spec, client, schema) {
+  if (spec.dialect === 'dameng') {
+    const filter = schema === '' ? '' : ' AND OWNER = ? '
+    const params = schema === '' ? [] : [schema]
+    const scope = schema === '' ? 'USER_TABLES' : 'ALL_TABLES'
+    const result = await damengRun(
+      client,
+      `SELECT OWNER AS "schema", TABLE_NAME AS "name", 'TABLE' AS "type" FROM ${scope}`
+      + ' WHERE 1 = 1' + filter + ' ORDER BY OWNER, TABLE_NAME',
+      params,
+      { readOnly: true },
+    )
+    return damengRows(result, damengColumns(result)).map((row) => ({
+      schema: row.schema,
+      name: row.name,
+      type: row.type,
+    }))
+  }
   if (spec.dialect === 'sqlite') {
     const rows = client
       .prepare("SELECT name, type FROM sqlite_master WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%' ORDER BY name")
@@ -489,6 +606,25 @@ async function listTables(spec, client, schema) {
 }
 
 async function listFields(spec, client, schema, table) {
+  if (spec.dialect === 'dameng') {
+    const scope = schema === '' ? 'USER_TAB_COLUMNS' : 'ALL_TAB_COLUMNS'
+    const params = schema === '' ? [table] : [schema, table]
+    const filter = schema === '' ? 'TABLE_NAME = ?' : 'OWNER = ? AND TABLE_NAME = ?'
+    const result = await damengRun(
+      client,
+      `SELECT COLUMN_NAME AS "name", DATA_TYPE AS "type", NULLABLE AS "nullable", `
+      + `COALESCE(DATA_DEFAULT, '') AS "default" FROM ${scope} WHERE ${filter} ORDER BY COLUMN_ID`,
+      params,
+      { readOnly: true },
+    )
+    return damengRows(result, damengColumns(result)).map((row) => ({
+      name: row.name,
+      type: row.type,
+      null: String(row.nullable).toUpperCase() === 'Y',
+      default: String(row.default ?? ''),
+      primaryKey: false,
+    }))
+  }
   if (spec.dialect === 'sqlite') {
     const rows = client
       .prepare('SELECT name, type, "notnull", COALESCE(dflt_value, \'\') AS dflt, pk FROM pragma_table_info(?)')

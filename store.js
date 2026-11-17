@@ -7,12 +7,12 @@ import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 
 /** 支持的方言。opengauss 覆盖海量 Vastbase / openGauss / MogDB。 */
-export const DIALECTS = ['opengauss', 'postgres', 'mysql', 'sqlite']
+export const DIALECTS = ['opengauss', 'postgres', 'mysql', 'dameng', 'sqlite']
 
 /** id 直接进文件名与凭据键，限制得严一点。 */
 const ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,40}$/
 
-const DEFAULT_PORT = { opengauss: 5432, postgres: 5432, mysql: 3306, sqlite: 0 }
+const DEFAULT_PORT = { opengauss: 5432, postgres: 5432, mysql: 3306, dameng: 5236, sqlite: 0 }
 
 /**
  * DSH home：显式 $DSH_HOME 优先，与 dsh-home-paths 的约定一致。

@@ -1,7 +1,7 @@
 {
   "name": "@skyrocks/dsh-db",
-  "version": "0.1.2",
-  "description": "DeepSeek Harness plugin: 多数据源数据库查询（海量 Vastbase / openGauss、PostgreSQL、MySQL、SQLite）；设置页里增删改，默认只读，写入逐条审批",
+  "version": "0.2.0",
+  "description": "DeepSeek Harness plugin: 多数据源数据库查询（海量 Vastbase / openGauss、达梦 DM8、PostgreSQL、MySQL、SQLite）；设置页里增删改，默认只读，写入逐条审批",
   "license": "MIT",
   "type": "module",
   "main": "./index.js",
@@ -52,15 +52,19 @@
   "dependencies": {
     "@deepseek-ai/schemastery": "^3.19.0",
     "mysql2": "^3.11.0",
-    "opengauss.js": "^1.2.2"
+    "opengauss.js": "^1.2.2",
+    "dmdb": "^1.0.52452"
   },
   "keywords": [
     "deepseek-harness",
     "dsh",
     "dsh-plugin",
     "database",
+    "sql",
     "opengauss",
     "vastbase",
+    "dameng",
+    "dm8",
     "postgresql",
     "mysql",
     "sqlite"
@@ -84,5 +88,16 @@
   "homepage": "https://github.com/skyrocks/dsh-db#readme",
   "bugs": {
     "url": "https://github.com/skyrocks/dsh-db/issues"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    },
+    "@deepseek-ai/cordis": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-typert-protocol": {
+      "optional": true
+    }
   }
 }

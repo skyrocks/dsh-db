@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.0
+
+新增 **达梦 DM8** 数据源，用官方 `dmdb` 驱动（纯 JS，oracledb 风格 API，Node 12+）。
+
+- 方言列表、默认端口（5236）、设置界面、`db_connections` 展示都接上。
+- 只读路径：每条查询前 `SET TRANSACTION READ ONLY`，查完回滚；开不起只读事务就拒绝查询（与其他方言一致的 fail closed）。
+- 写路径：连接开 `autoCommit`，和常见客户端行为一致。
+- 结构查询走 `USER_TABLES` / `ALL_TABLES`、`USER_TAB_COLUMNS` / `ALL_TAB_COLUMNS`（Oracle 兼容视图）。
+- `peerDependencies` 标记为 optional：`npm install` 不再因 DSH 内置 cordis 版本冲突而失败。
+- 测试 30 条（+1：达梦默认端口与方言校验）。
+
 ## 0.1.2
 
 把「查询路径只读」从「尽力而为」改成「要么只读、要么拒绝」。

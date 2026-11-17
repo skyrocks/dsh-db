@@ -5,7 +5,7 @@
 
 A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`) plugin for **multi-source database queries**. Add, edit, and remove data sources under **Settings → Databases**; the model then queries them through tools. Read-only by default, every write asks you first.
 
-Speaks **Vastbase / openGauss**, PostgreSQL, MySQL, and SQLite.
+Speaks **Vastbase / openGauss**, **Dameng DM8**, PostgreSQL, MySQL, and SQLite.
 
 ## Why openGauss needs its own path
 
@@ -49,7 +49,7 @@ Every result also echoes the SQL that actually ran.
 Three layers; any one of them refuses, so the call fails:
 
 1. **Statement gate** (`sqlguard.js`): only single statements starting with `select / with / show / explain / describe / values / table`. Comments and string literals are stripped first, so `-- delete` is not a false positive and `with x as (delete …)` cannot slip through. **`PRAGMA` / `ATTACH` / `DETACH` are refused**: they change database state without going through write approval (`PRAGMA user_version=…`, `journal_mode`, `writable_schema`). Use `db_schema` for structure; SQLite's read-only table functions (`SELECT * FROM pragma_table_info('t')`) still work.
-2. **Session-level read-only**: `db_query` and `db_schema` use a **dedicated read-only connection**, even when the data source itself is writable: `SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY` (MySQL uses `SET SESSION TRANSACTION READ ONLY`, SQLite opens a read-only handle plus `PRAGMA query_only`). The database refuses the write, not the plugin.
+2. **Session-level read-only**: `db_query` and `db_schema` use a **dedicated read-only connection**, even when the data source itself is writable: `SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY` (MySQL uses `SET SESSION TRANSACTION READ ONLY`, Dameng wraps every query in a `SET TRANSACTION READ ONLY` transaction and rolls back, SQLite opens a read-only handle plus `PRAGMA query_only`). The database refuses the write, not the plugin.
 3. **The switch in the UI**: `db_exec` refuses on a read-only source; making it writable is a click only you can make.
 
 ## Why writes need approval
@@ -58,7 +58,7 @@ Three layers; any one of them refuses, so the call fails:
 
 ## Known limits
 
-- PostgreSQL-family, MySQL, and SQLite only; Oracle and SQL Server are not wired up.
+- PostgreSQL-family, MySQL, Dameng DM8, and SQLite only; Oracle and SQL Server are not wired up.
 - Results come back as text: cells become strings (`NULL` shown as `NULL`) and a single call returns at most `maxRows` rows. CSV export is not implemented.
 - Queries on one data source run serially, so a slow query blocks the next one.
 - `db_schema` does not list foreign keys, indexes, or triggers.

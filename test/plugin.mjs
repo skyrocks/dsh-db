@@ -227,6 +227,14 @@ await check('数据源默认值：端口、模式、上限', () => {
   assert.equal(source.host, '127.0.0.1')
 })
 
+await check('达梦方言：默认端口 5236，端口可覆盖', () => {
+  const source = normalizeSource({ name: '达梦库', dialect: 'dameng', database: 'APP' })
+  assert.equal(source.dialect, 'dameng')
+  assert.equal(source.port, 5236)
+  const custom = normalizeSource({ name: '达梦库2', dialect: 'dameng', database: 'APP', port: 5237 })
+  assert.equal(custom.port, 5237)
+})
+
 await check('凭据键名可预测且是合法标识符', () => {
   assert.equal(secretRefFor('prod-ro'), 'DSH_DB_PROD_RO')
   assert.match(secretRefFor('a_b-1'), /^[A-Za-z_][A-Za-z0-9_]*$/)
