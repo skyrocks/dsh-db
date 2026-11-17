@@ -7,7 +7,9 @@ import { join } from 'node:path'
 import assert from 'node:assert/strict'
 import { DatabaseSync } from 'node:sqlite'
 
-import { Registry, rowCells } from '../drivers.js'
+import { EventEmitter } from 'node:events'
+
+import { Registry, rowCells, withTimeout, attachErrorGuard } from '../drivers.js'
 import { assertReadable, assertSingleWritable, statements, skeleton } from '../sqlguard.js'
 
 let passed = 0
@@ -141,6 +143,34 @@ await check('PRAGMA 写在查询路径上被数据库拒绝', async () => {
 await check('可写数据源上读仍然可用', async () => {
   const result = await registry.query('rw', 'SELECT COUNT(*) AS n FROM users', 10)
   assert.equal(rowCells(result.rows[0], result.columns)[0], '4')
+})
+
+await check('没有 error 监听时，连接报错会直接抛出（DSH 崩溃的成因）', () => {
+  assert.throws(() => new EventEmitter().emit('error', new Error('socket hang up')))
+})
+
+await check("挂上 guard 后 'error' 不再抛出，并标记连接已坏", () => {
+  const entry = { broken: false, lastError: null }
+  const client = new EventEmitter()
+  attachErrorGuard(entry, client)
+  assert.doesNotThrow(() => client.emit('error', new Error('read EADDRNOTAVAIL')))
+  assert.equal(entry.broken, true)
+  assert.match(entry.lastError.message, /EADDRNOTAVAIL/)
+})
+
+await check('超时错误带 DSH_DB_TIMEOUT，超时后旧连接会被丢弃重连', async () => {
+  const never = new Promise(() => {})
+  // withTimeout 里的定时器是 unref 的（生产环境不该拖着进程）；测试里需要自己保活，
+  // 否则事件循环空转、进程在定时器触发前就退出了。
+  const keepAlive = setTimeout(() => {}, 500)
+  try {
+    await assert.rejects(
+      () => withTimeout(never, 10, '查询'),
+      (error) => error.code === 'DSH_DB_TIMEOUT',
+    )
+  } finally {
+    clearTimeout(keepAlive)
+  }
 })
 
 await registry.closeAll()

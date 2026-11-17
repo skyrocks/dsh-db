@@ -82,6 +82,9 @@ class Entry {
     this.client = null
     this.queue = Promise.resolve()
     this.password = ''
+    /** 连接上是否已经发生过 'error' 事件（socket 断了、服务端踢了）。 */
+    this.broken = false
+    this.lastError = null
   }
 
   /** 串行化：任何时刻只有一个查询在跑。 */
@@ -94,10 +97,20 @@ class Entry {
   async close() {
     const client = this.client
     this.client = null
+    this.broken = false
     if (client === null) return
     try {
-      if (typeof client.close === 'function') await client.close()
-      else if (typeof client.end === 'function') await client.end()
+      const closing = typeof client.close === 'function'
+        ? client.close()
+        : (typeof client.end === 'function' ? client.end() : Promise.resolve())
+      // 连接已经坏了的时候 end() 可能一直等：最多等 2 秒，然后放手。
+      await Promise.race([
+        Promise.resolve(closing),
+        new Promise((resolve) => {
+          const timer = setTimeout(resolve, 2000)
+          if (typeof timer.unref === 'function') timer.unref()
+        }),
+      ])
     } catch {
       // 关闭失败不影响主流程
     }
@@ -167,24 +180,16 @@ export class Registry {
 
   /** 确保连接可用；坏了就丢掉重连一次。 */
   async clientOf(entry) {
+    // socket 已经报过错（服务端踢连接、网络断）就丢掉重连，别在死连接上等超时。
+    if (entry.client !== null && entry.broken === true) await entry.close()
     if (entry.client !== null) return entry.client
     const { spec } = entry
     const timeoutMs = spec.timeoutMs
     try {
-      if (spec.dialect === 'sqlite') {
-        entry.client = openSqlite(spec, entry.readOnly)
-        return entry.client
-      }
-      if (spec.dialect === 'mysql') {
-        entry.client = await openMysql(spec, entry.password, timeoutMs, entry.readOnly)
-        return entry.client
-      }
-      if (spec.dialect === 'dameng') {
-        entry.client = await openDameng(spec, entry.password, timeoutMs, entry.readOnly)
-        return entry.client
-      }
-      entry.client = await openPostgresLike(spec, entry.password, timeoutMs, entry.readOnly)
-      return entry.client
+      const client = await connect(spec, entry, timeoutMs)
+      entry.client = client
+      attachErrorGuard(entry, client)
+      return client
     } catch (error) {
       entry.client = null
       throw missingDriver(spec.dialect, error)
@@ -208,7 +213,9 @@ export class Registry {
       } catch (error) {
         // 语句级错误不等于连接坏；但超时/网络错误后连接不可信，丢掉重连。
         const message = String(error === null || error === undefined ? '' : error.message ?? error)
-        if (/timeout|closed|terminated|ECONNRESET|EPIPE|not connected/i.test(message)) {
+        const code = error === null || error === undefined ? undefined : error.code
+        if (code === 'DSH_DB_TIMEOUT' || code === 'ECONNRESET' || code === 'EPIPE'
+          || /timeout|超时|closed|terminated|ECONNRESET|EPIPE|not connected/i.test(message)) {
           await entry.close()
         }
         throw error
@@ -259,15 +266,62 @@ export class Registry {
   }
 }
 
+/**
+ * 给连接挂一个 'error' 监听。
+ *
+ * pg（opengauss.js）、mysql2、dmdb 都是 EventEmitter。EventEmitter 在没有
+ * 'error' 监听时会把 'error' 直接抛出——那是同步的未捕获异常，会把整个 Host
+ * 进程打掉（DSH 直接退出），而不是让那条查询失败。
+ */
+/** 关掉一个刚建/建了一半的连接；任何失败都吞掉，这只是在清理。 */
+async function destroyClient(client) {
+  if (client === null || client === undefined) return
+  try {
+    if (typeof client.destroy === 'function') client.destroy()
+    else if (typeof client.close === 'function') await client.close()
+    else if (typeof client.end === 'function') await client.end()
+  } catch {
+    // 清理失败不影响结论
+  }
+}
+
+export function attachErrorGuard(entry, client) {
+  if (client === null || client === undefined || typeof client.on !== 'function') return
+  try {
+    client.on('error', (error) => {
+      entry.broken = true
+      entry.lastError = error
+    })
+  } catch {
+    // 有些连接对象不接受监听，忽略
+  }
+}
+
+/** 按方言建连接。每个 open* 都必须在 connect 之前挂好 error 监听。 */
+async function connect(spec, entry, timeoutMs) {
+  if (spec.dialect === 'sqlite') return openSqlite(spec, entry.readOnly)
+  if (spec.dialect === 'mysql') return openMysql(spec, entry, timeoutMs)
+  if (spec.dialect === 'dameng') return openDameng(spec, entry, timeoutMs)
+  return openPostgresLike(spec, entry, timeoutMs)
+}
+
 /** 带超时的 Promise。 */
-function withTimeout(promise, timeoutMs, label) {
+export function withTimeout(promise, timeoutMs, label) {
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return promise
+  const settled = Promise.resolve(promise)
+  // 关键：超时赢了以后，原来那个 promise 仍然会 reject。不接住的话就是
+  // unhandledRejection，Node 默认直接退出进程（DSH 崩掉就是这么来的）。
+  settled.catch(() => {})
   let timer
   const timeout = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`${label} 超时（${timeoutMs}ms）`)), timeoutMs)
+    timer = setTimeout(() => {
+      const error = new Error(`${label} 超时（${timeoutMs}ms）`)
+      error.code = 'DSH_DB_TIMEOUT'
+      reject(error)
+    }, timeoutMs)
     if (typeof timer.unref === 'function') timer.unref()
   })
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer))
+  return Promise.race([settled, timeout]).finally(() => clearTimeout(timer))
 }
 
 /**
@@ -300,21 +354,23 @@ async function requireReadOnlySession(client, statements) {
 }
 
 /** 达梦：官方 dmdb 驱动（纯 JS，oracledb 风格 API）。 */
-async function openDameng(spec, password, timeoutMs, readOnly) {
+async function openDameng(spec, entry, timeoutMs) {
   const dmdb = require('dmdb')
-  return withTimeout(
+  const connection = await withTimeout(
     dmdb.getConnection({
       user: spec.user,
-      password,
+      password: entry.password,
       connectString: `${spec.host}:${spec.port}`,
       // 只读连接关掉自动提交：每条查询自己包一个只读事务，查完回滚。
-      autoCommit: readOnly !== true,
+      autoCommit: entry.readOnly !== true,
       connectTimeout: timeoutMs,
       socketTimeout: Math.max(1000, spec.timeoutMs),
     }),
     timeoutMs,
     '连接',
   )
+  attachErrorGuard(entry, connection)
+  return connection
 }
 
 /**
@@ -369,13 +425,13 @@ function damengRows(result, columns) {
     : row))
 }
 
-async function openPostgresLike(spec, password, timeoutMs, readOnly) {
+async function openPostgresLike(spec, entry, timeoutMs) {
   const { Client } = require('opengauss.js')
   const options = {
     host: spec.host,
     port: spec.port,
     user: spec.user,
-    password,
+    password: entry.password,
     database: spec.database,
     databaseType: spec.dialect === 'opengauss' ? 'openGauss' : 'postgres',
     connectionTimeoutMillis: timeoutMs,
@@ -386,14 +442,22 @@ async function openPostgresLike(spec, password, timeoutMs, readOnly) {
       : { rejectUnauthorized: false }
   }
   const client = new Client(options)
-  await withTimeout(client.connect(), timeoutMs, '连接')
+  // 必须在 connect 之前挂监听：连接失败时 socket 也会 emit 'error'，
+  // 没人接就是未捕获异常，直接打掉 Host 进程。
+  attachErrorGuard(entry, client)
+  try {
+    await withTimeout(client.connect(), timeoutMs, '连接')
+  } catch (error) {
+    await destroyClient(client)
+    throw error
+  }
   // 只读 + 语句超时：放在会话级，比逐条改 SQL 可靠。
   try {
     await client.query(`SET statement_timeout = ${Math.max(1000, spec.timeoutMs)}`)
   } catch {
     // 老版本可能不认，不影响查询
   }
-  if (readOnly === true) {
+  if (entry.readOnly === true) {
     await requireReadOnlySession(client, [
       'SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY',
       'SET default_transaction_read_only = on',
@@ -402,23 +466,29 @@ async function openPostgresLike(spec, password, timeoutMs, readOnly) {
   return client
 }
 
-async function openMysql(spec, password, timeoutMs, readOnly) {
+async function openMysql(spec, entry, timeoutMs) {
   const mysql = require('mysql2/promise')
-  const connection = await withTimeout(
-    mysql.createConnection({
-      host: spec.host,
-      port: spec.port,
-      user: spec.user,
-      password,
-      database: spec.database,
-      connectTimeout: timeoutMs,
-      supportBigNumbers: true,
-      dateStrings: true,
-    }),
-    timeoutMs,
-    '连接',
-  )
-  if (readOnly === true) {
+  let connection
+  try {
+    connection = await withTimeout(
+      mysql.createConnection({
+        host: spec.host,
+        port: spec.port,
+        user: spec.user,
+        password: entry.password,
+        database: spec.database,
+        connectTimeout: timeoutMs,
+        supportBigNumbers: true,
+        dateStrings: true,
+      }),
+      timeoutMs,
+      '连接',
+    )
+  } catch (error) {
+    throw error
+  }
+  attachErrorGuard(entry, connection)
+  if (entry.readOnly === true) {
     await requireReadOnlySession(connection, [
       'SET SESSION TRANSACTION READ ONLY',
       'SET SESSION transaction_read_only = 1',

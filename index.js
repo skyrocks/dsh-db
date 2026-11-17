@@ -39,6 +39,8 @@ export function apply(ctx) {
     if (typeof ctx.effect === 'function') ctx.effect(() => () => dispose())
   }
   if (typeof ctx.effect === 'function') {
-    ctx.effect(() => () => service.dispose())
+    ctx.effect(() => () => {
+      service.dispose().catch(() => {})
+    })
   }
 }

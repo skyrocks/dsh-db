@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.2.1
+
+崩溃修复：连接失败或查询失败时，DSH Host 进程会被直接打掉（崩溃日志里的
+`dsh: fatal uncaught exception: Error: read EADDRNOTAVAIL`）。
+
+- **根因**：pg（opengauss.js）、mysql2、dmdb 都是 EventEmitter，socket 上的 `error`
+  没人监听时会被 EventEmitter 直接抛出——那是未捕获异常，整个进程退出。
+  旧代码在连接成功之后才用到客户端，连接失败/中途断开时完全没有监听。
+- 现在**建出连接对象的第一时间就挂 `error` 监听**（在 `connect()` 之前），
+  标记该连接已坏；下一次调用自动丢掉重连。连接失败时也会 `destroy()` 掉半个连接。
+- 超时错误带上 `code = DSH_DB_TIMEOUT`。原来靠中文字面「超时」去匹配 `/timeout/`，
+  永远匹配不上，坏连接不会被丢弃，会在同一条还在跑的查询上再发查询
+  （崩溃日志里那条 `client.query() when the client is already executing a query` 就是它）。
+- 关闭连接最多等 2 秒，不再让一次工具调用被坏连接拖住。
+- 测试 33 条（+3：无监听会抛、guard 能接住并标记、超时可判定）。
+
 ## 0.2.0
 
 新增 **达梦 DM8** 数据源，用官方 `dmdb` 驱动（纯 JS，oracledb 风格 API，Node 12+）。
