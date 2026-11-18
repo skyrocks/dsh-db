@@ -156,10 +156,15 @@ export class Registry {
 
   /** 数据源被编辑或删除后调用：丢掉旧连接，下次按新配置重连。 */
   async invalidate(id) {
-    for (const [key, entry] of [...this.entries]) {
+    for (const key of [...this.entries.keys()]) {
       if (key !== `${id}|ro` && key !== `${id}|rw`) continue
+      const entry = this.entries.get(key)
+      if (entry === undefined) continue
+      // 先从缓存摘掉：新请求会建新连接，不会拿到这条正在关闭的。
       this.entries.delete(key)
-      await entry.close()
+      // 关闭也排队：正跑着的查询先结束，别把 SQLite 句柄从它脚下抽走
+      // （Windows 上句柄没关干净，删库/改名会 EBUSY）。
+      await entry.run(() => entry.close())
     }
   }
 
@@ -261,8 +266,9 @@ export class Registry {
   }
 
   async closeAll() {
-    for (const entry of this.entries.values()) await entry.close()
+    const entries = [...this.entries.values()]
     this.entries.clear()
+    for (const entry of entries) await entry.run(() => entry.close())
   }
 }
 

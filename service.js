@@ -114,8 +114,9 @@ export class DbSourcesService extends TypertRemoteService {
     const existing = await this.store.read()
     const next = existing.filter((item) => item.id !== id)
     if (next.length === existing.length) return { removed: false }
-    await this.store.write(next)
+    // 先断连接再落盘：句柄必须在数据源从列表里消失之前释放干净。
     await this.registry.invalidate(id)
+    await this.store.write(next)
 
     const credentials = optionalService(this.ctx, 'credentials')
     if (credentials !== undefined && credentials !== null && typeof credentials.unset === 'function') {

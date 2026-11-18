@@ -145,6 +145,58 @@ await check('可写数据源上读仍然可用', async () => {
   assert.equal(rowCells(result.rows[0], result.columns)[0], '4')
 })
 
+await check('删除数据源：先等在跑的查询结束，再关连接', async () => {
+  const registry2 = new Registry({
+    all: async () => [sources[0]],
+    one: async (id) => (id === sources[0].id ? sources[0] : undefined),
+    secret: async () => '',
+  })
+  const entry = await registry2.entryFor(sources[0], true)
+  const order = []
+  // 用一个假的连接记录关闭时机；真 SQLite 是同步的，无法制造并发。
+  entry.client = { close: () => { order.push('close'); return Promise.resolve() } }
+  const task = entry.run(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    order.push('query-done')
+  })
+  const closing = registry2.invalidate(sources[0].id)
+  await Promise.all([task, closing])
+  assert.deepEqual(order, ['query-done', 'close'], '必须等查询跑完再关')
+  assert.equal(registry2.entries.size, 0, '关闭后不应残留条目')
+})
+
+await check('关闭后再次查询会重新建连接', async () => {
+  const registry3 = new Registry({
+    all: async () => [sources[0]],
+    one: async (id) => (id === sources[0].id ? sources[0] : undefined),
+    secret: async () => '',
+  })
+  const first = await registry3.query(sources[0].id, 'SELECT 1 AS n', 5)
+  assert.equal(rowCells(first.rows[0], first.columns)[0], '1')
+  assert.equal(registry3.entries.size, 1)
+  await registry3.invalidate(sources[0].id)
+  assert.equal(registry3.entries.size, 0)
+  const second = await registry3.query(sources[0].id, 'SELECT 2 AS n', 5)
+  assert.equal(rowCells(second.rows[0], second.columns)[0], '2', '应当能重连')
+  await registry3.closeAll()
+})
+
+await check('删除数据源后 SQLite 句柄真的关掉了（Windows 上才不会 EBUSY）', async () => {
+  const registry4 = new Registry({
+    all: async () => [sources[0]],
+    one: async (id) => (id === sources[0].id ? sources[0] : undefined),
+    secret: async () => '',
+  })
+  await registry4.query(sources[0].id, 'SELECT 1 AS n', 5)
+  const entry = [...registry4.entries.values()][0]
+  const client = entry.client
+  assert.doesNotThrow(() => client.prepare('SELECT 1'), '删之前句柄应当是开着的')
+  await registry4.invalidate(sources[0].id)
+  // close() 之后再操作会抛 "database is not open"：说明文件描述符已归还，
+  // Windows 上删/改名这个 .db 文件才不会 EBUSY。
+  assert.throws(() => client.prepare('SELECT 1'), /not open|closed/i)
+})
+
 await check('没有 error 监听时，连接报错会直接抛出（DSH 崩溃的成因）', () => {
   assert.throws(() => new EventEmitter().emit('error', new Error('socket hang up')))
 })
