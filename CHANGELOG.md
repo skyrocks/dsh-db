@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.3
+
+- 设置页左侧导航补上专属图标：注册 `settings.section.icon`（之前只注册了 `settings.section`，不注册图标就会显示壳默认的齿轮）。
+
 ## 0.2.2
 
 资源释放修复。审阅指出 Windows 上 `EPERM` / `EBUSY: ... unlink sample.db`，并怀疑

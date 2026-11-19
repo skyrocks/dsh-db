@@ -549,6 +549,22 @@ window.__ModuleLoader__.load({
       );
     }
 
+    /** 设置页左侧导航里的图标（数据库）。 */
+    function DbGlyph(props) {
+      const size = props !== null && typeof props === "object" && typeof props.size === "number" ? props.size : 16;
+      return React.createElement(
+        "svg",
+        { width: size, height: size, viewBox: "0 0 16 16", fill: "none", "aria-hidden": "true", focusable: "false" },
+        React.createElement("path", {
+          d: "M3 4.2c0-1 2.2-1.8 5-1.8s5 .8 5 1.8M3 4.2v7.6c0 1 2.2 1.8 5 1.8s5-.8 5-1.8V4.2M3 8c0 1 2.2 1.8 5 1.8s5-.8 5-1.8",
+          stroke: "currentColor",
+          strokeWidth: 1.4,
+          strokeLinecap: "round",
+          strokeLinejoin: "round"
+        })
+      );
+    }
+
     function apply(ctx) {
       ctxRef = ctx;
       mountReady = ctx.remote.$mount(REMOTE);
@@ -557,6 +573,11 @@ window.__ModuleLoader__.load({
       ctx.effect(() => ensureStyle());
       slots.inject("settings.section", () =>
         slots.register({ name: "settings.section", id: "db-sources", order: 42, label: () => "数据库" }, DbSection)
+      );
+
+      // 设置页左侧导航的图标：不注册就是壳默认的齿轮。
+      slots.inject("settings.section.icon", () =>
+        slots.register({ name: "settings.section.icon", id: "db-sources", order: 42 }, DbGlyph)
       );
     }
 
