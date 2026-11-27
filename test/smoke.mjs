@@ -9,7 +9,7 @@ import { DatabaseSync } from 'node:sqlite'
 
 import { EventEmitter } from 'node:events'
 
-import { Registry, rowCells, withTimeout, attachErrorGuard } from '../drivers.js'
+import { Registry, rowCells, withTimeout, attachErrorGuard, isConnectionClosed } from '../drivers.js'
 import { assertReadable, assertSingleWritable, statements, skeleton } from '../sqlguard.js'
 
 let passed = 0
@@ -223,6 +223,201 @@ await check('超时错误带 DSH_DB_TIMEOUT，超时后旧连接会被丢弃重�
   } finally {
     clearTimeout(keepAlive)
   }
+})
+
+await check('判死：中文断连文案、驱动 code、SQLite 句柄都算连接已关', () => {
+  const closed = [
+    new Error('连接已经关闭'),
+    new Error('连接已关闭'),
+    new Error('连接已被关闭'),
+    new Error('连接已经被关闭'),
+    new Error('连接已被服务端关闭'),
+    new Error('连接已断开'),
+    new Error('连接被重置'),
+    new Error('会话已经结束'),
+    new Error('会话已断开'),
+    new Error('未连接到数据库'),
+    new Error('database is not open'),
+    new Error('Connection lost'),
+    new Error('socket hang up'),
+    Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }),
+    Object.assign(new Error('whatever'), { code: 'PROTOCOL_CONNECTION_LOST' }),
+    Object.assign(new Error('whatever'), { code: 'ER_CONNECTION_KILLED' }),
+    'Connection terminated unexpectedly',
+  ]
+  for (const error of closed) assert.equal(isConnectionClosed(error), true, String(error && error.message ? error.message : error))
+})
+
+await check('判死：语句级错误不算断连', () => {
+  for (const error of [
+    null,
+    undefined,
+    new Error('near "FROM": syntax error'),
+    new Error('表 users 不存在'),
+    new Error('对只读事务不允许 INSERT'),
+    new Error('连接超时'),          // 超时由 needsFreshConnection 走另一条路：丢连接但不重试
+    new Error('连接不合法'),
+    Object.assign(new Error('duplicate key'), { code: '23505' }),
+  ]) assert.equal(isConnectionClosed(error), false, String(error && error.message ? error.message : error))
+})
+
+function fakeEntry() {
+  return {
+    client: null,
+    broken: false,
+    lastError: null,
+    closes: 0,
+    async close() {
+      this.closes += 1
+      this.client = null
+    },
+  }
+}
+
+await check('读路径：连接被关掉后丢掉旧连接、重连、重试一次', async () => {
+  const registry5 = new Registry({ all: async () => [], one: async () => undefined, secret: async () => '' })
+  registry5.clientOf = async () => ({})
+  const entry = fakeEntry()
+  let attempts = 0
+  const result = await registry5.readTask(entry, async () => {
+    attempts += 1
+    if (attempts === 1) throw new Error('连接已经关闭')
+    return 'ok'
+  })
+  assert.equal(result, 'ok')
+  assert.equal(attempts, 2)
+  assert.equal(entry.closes, 1, '重试前必须丢掉死连接')
+})
+
+await check('读路径：连续断连只重试一次，不再无限循环', async () => {
+  const registry6 = new Registry({ all: async () => [], one: async () => undefined, secret: async () => '' })
+  registry6.clientOf = async () => ({})
+  const entry = fakeEntry()
+  let attempts = 0
+  await assert.rejects(
+    () => registry6.readTask(entry, async () => {
+      attempts += 1
+      throw new Error('连接已经关闭')
+    }),
+    /连接已经关闭/,
+  )
+  assert.equal(attempts, 2, '最多两次尝试')
+  assert.equal(entry.closes, 2)
+})
+
+await check('读路径：超时只丢连接、不重试', async () => {
+  const registry7 = new Registry({ all: async () => [], one: async () => undefined, secret: async () => '' })
+  registry7.clientOf = async () => ({})
+  const entry = fakeEntry()
+  let attempts = 0
+  await assert.rejects(
+    () => registry7.readTask(entry, async () => {
+      attempts += 1
+      throw Object.assign(new Error('查询 超时（10ms）'), { code: 'DSH_DB_TIMEOUT' })
+    }),
+    (error) => error.code === 'DSH_DB_TIMEOUT',
+  )
+  assert.equal(attempts, 1, '超时的重查询不该跑两遍')
+  assert.equal(entry.closes, 1)
+})
+
+await check('读路径：语句错误不动连接', async () => {
+  const registry8 = new Registry({ all: async () => [], one: async () => undefined, secret: async () => '' })
+  const client = {}
+  registry8.clientOf = async () => client
+  const entry = fakeEntry()
+  entry.client = client
+  let attempts = 0
+  await assert.rejects(
+    () => registry8.readTask(entry, async () => {
+      attempts += 1
+      throw new Error('near "FROM": syntax error')
+    }),
+    /syntax error/,
+  )
+  assert.equal(attempts, 1)
+  assert.equal(entry.closes, 0)
+  assert.equal(entry.client, client, '连接没坏就不该丢')
+})
+
+await check('SQLite：句柄被外部关掉后，query / tables 自动重连', async () => {
+  const registry9 = new Registry({
+    all: async () => [sources[0]],
+    one: async (id) => (id === sources[0].id ? sources[0] : undefined),
+    secret: async () => '',
+  })
+  const first = await registry9.query(sources[0].id, 'SELECT 1 AS n', 5)
+  assert.equal(rowCells(first.rows[0], first.columns)[0], '1')
+  const entry = [...registry9.entries.values()][0]
+  entry.client.close()
+  const second = await registry9.query(sources[0].id, 'SELECT 2 AS n', 5)
+  assert.equal(rowCells(second.rows[0], second.columns)[0], '2', '应当重连后成功')
+  assert.doesNotThrow(() => entry.client.prepare('SELECT 1'), '应当换成了可用连接')
+  // 语句级错误不该动连接：同一条连接继续用。
+  const kept = entry.client
+  await assert.rejects(() => registry9.query(sources[0].id, 'SELECT * FROM nope', 5), /no such table/)
+  assert.equal(entry.client, kept, '语句错误不该丢掉连接')
+  entry.client.close()
+  const tables = await registry9.tables(sources[0].id, '')
+  assert.ok(tables.rows.some((row) => row.name === 'users'), 'db_schema 也应重连')
+  entry.client.close()
+  const fields = await registry9.fields(sources[0].id, '', 'users')
+  assert.deepEqual(fields.rows.map((row) => row.name), ['id', 'name', 'email'], '字段查询也应重连')
+  await registry9.closeAll()
+})
+
+await check('达梦：只读事务失败若是断连，保留原始「连接已经关闭」', async () => {
+  const dm = { id: 'dm', name: '达梦', dialect: 'dameng', host: '127.0.0.1', port: 5236, database: '', user: 'SYSDBA', sslmode: 'disable', mode: 'read', maxRows: 10, timeoutMs: 5000 }
+  const registry10 = new Registry({
+    all: async () => [dm],
+    one: async (id) => (id === dm.id ? dm : undefined),
+    secret: async () => '',
+  })
+  let calls = 0
+  let closes = 0
+  const fake = {
+    execute: async () => {
+      calls += 1
+      throw new Error('连接已经关闭')
+    },
+    rollback: async () => {},
+    close: async () => { closes += 1 },
+  }
+  registry10.clientOf = async (entry) => {
+    entry.client = fake
+    return fake
+  }
+  await assert.rejects(
+    () => registry10.query('dm', 'SELECT 1', 10),
+    (error) => error.message === '连接已经关闭',
+  )
+  assert.equal(calls, 2, '断连 → 重连 → 再试一次')
+  assert.equal(closes, 2)
+})
+
+await check('达梦：非断连的只读事务失败仍然包装成 fail-closed 提示', async () => {
+  const dm = { id: 'dm2', name: '达梦', dialect: 'dameng', host: '127.0.0.1', port: 5236, database: '', user: 'SYSDBA', sslmode: 'disable', mode: 'read', maxRows: 10, timeoutMs: 5000 }
+  const registry11 = new Registry({
+    all: async () => [dm],
+    one: async (id) => (id === dm.id ? dm : undefined),
+    secret: async () => '',
+  })
+  let calls = 0
+  let closes = 0
+  registry11.clientOf = async () => ({
+    execute: async () => {
+      calls += 1
+      throw new Error('无效的事务状态')
+    },
+    rollback: async () => {},
+    close: async () => { closes += 1 },
+  })
+  await assert.rejects(
+    () => registry11.query('dm2', 'SELECT 1', 10),
+    /无法把达梦连接切到只读事务/,
+  )
+  assert.equal(calls, 1, '不是断连就不该重试')
+  assert.equal(closes, 0)
 })
 
 await registry.closeAll()

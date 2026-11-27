@@ -67,6 +67,67 @@ export function rowCells(row, columns) {
   return columns.map((column) => cellText(row[column]))
 }
 
+/** 驱动在连接已断时可能给出的 code。 */
+const CLOSED_CODES = new Set([
+  'ECONNRESET',
+  'EPIPE',
+  'ENOTCONN',
+  'ECONNABORTED',
+  'PROTOCOL_CONNECTION_LOST',
+  'ER_SERVER_SHUTDOWN',
+  'ER_CONNECTION_KILLED',
+])
+
+// 判死文案必须中英双语：达梦断连只抛「连接已经关闭」，不带 code，
+// 旧代码只认英文 closed，死连接就被一直缓存着。
+const CLOSED_TEXT = new RegExp([
+  '\\bclosed\\b',
+  'not connected',
+  '\\blost\\b',
+  'terminated',
+  'socket hang up',
+  'broken pipe',
+  'not open',
+  'connection (?:is )?(?:gone|dead)',
+  // 「连接已经关闭」「连接已被关闭」「连接已断开」都要覆盖：中文里已/被可以叠加。
+  '连接(?:已经|已被|已|被)*(?:服务端|服务器)?\\s*(?:关闭|断开|失效|中断|重置|不可用|未打开)',
+  '会话(?:已经|已被|已|被)*\\s*(?:关闭|结束|失效|断开|中断|重置)',
+  '未连接到数据库',
+].join('|'), 'i')
+
+/**
+ * 连接是否已经不可用：服务端回收了会话、socket 断了、SQLite 句柄被关了。
+ *
+ * 同时看 `error.code` 和文案；文案中英双语。只用于判断「这条连接还能不能
+ * 继续用」，不判断语句本身是否合法。
+ * @param {unknown} error - 驱动抛出的错误（也接受字符串）。
+ * @returns {boolean}
+ */
+export function isConnectionClosed(error) {
+  if (error === null || error === undefined) return false
+  const object = typeof error === 'object' ? error : null
+  const code = object !== null && typeof object.code === 'string' ? object.code : ''
+  if (CLOSED_CODES.has(code)) return true
+  const message = object !== null && object.message !== undefined ? String(object.message) : String(error)
+  return CLOSED_TEXT.test(message)
+}
+
+/**
+ * 这条连接是否已经不配再被复用（该丢掉重连）。
+ * 超时也丢连接，但超时不算「断连」：读路径不重试，避免重查询跑两遍。
+ * @param {unknown} error
+ * @returns {boolean}
+ */
+function needsFreshConnection(error) {
+  if (isConnectionClosed(error)) return true
+  const object = error !== null && typeof error === 'object' ? error : null
+  const code = object !== null && typeof object.code === 'string' ? object.code : ''
+  if (code === 'DSH_DB_TIMEOUT' || code === 'ETIMEDOUT') return true
+  // 旧行为：文案里带 timeout/超时 的连接也不再用（driver 级超时可能不带 code）。
+  const message = object !== null && object.message !== undefined ? String(object.message) : String(error)
+  return /timeout|超时|timed out/i.test(message)
+}
+
 /**
  * 一条连接的生命周期：懒建连接、串行执行、出错即丢弃。
  * 单条连接上不做并发——数据库侧本来就是串行处理，串行能保证只读会话设置生效。
@@ -183,6 +244,38 @@ export class Registry {
     return entry
   }
 
+  /**
+   * 读路径统一入口：出错时按需丢掉旧连接。
+   *
+   * - 连接已被关闭（达梦「连接已经关闭」、SQLite「database is not open」、
+   *   服务端 kill session、socket reset……）：丢掉、重连、重试一次。读操作
+   *   没有副作用，重试是安全的。
+   * - 超时：只丢连接，不重试——一条本来就在超时的重查询不该跑两遍。
+   * - 语句级错误（语法、约束、表不存在）：连接是好的，原样抛出。
+   *
+   * 写路径不走这里：写语句重试可能写两遍。
+   * @param {Entry} entry
+   * @param {(client: object) => Promise<any>} task
+   * @returns {Promise<any>}
+   */
+  async readTask(entry, task) {
+    let attempt = 0
+    for (;;) {
+      try {
+        return await task(await this.clientOf(entry))
+      } catch (error) {
+        if (!needsFreshConnection(error)) throw error
+        // 先把坏连接从 entry 上摘掉，下一轮 clientOf 才会真的重连。
+        await entry.close()
+        if (isConnectionClosed(error) && attempt === 0) {
+          attempt += 1
+          continue
+        }
+        throw error
+      }
+    }
+  }
+
   /** 确保连接可用；坏了就丢掉重连一次。 */
   async clientOf(entry) {
     // socket 已经报过错（服务端踢连接、网络断）就丢掉重连，别在死连接上等超时。
@@ -211,20 +304,10 @@ export class Registry {
     const entry = await this.entryFor(spec, true)
     return entry.run(async () => {
       const started = Date.now()
-      try {
-        const client = await this.clientOf(entry)
-        const result = await queryClient(spec, client, sql, maxRows, spec.timeoutMs, entry.readOnly)
-        return { ...result, elapsedMs: Date.now() - started }
-      } catch (error) {
-        // 语句级错误不等于连接坏；但超时/网络错误后连接不可信，丢掉重连。
-        const message = String(error === null || error === undefined ? '' : error.message ?? error)
-        const code = error === null || error === undefined ? undefined : error.code
-        if (code === 'DSH_DB_TIMEOUT' || code === 'ECONNRESET' || code === 'EPIPE'
-          || /timeout|超时|closed|terminated|ECONNRESET|EPIPE|not connected/i.test(message)) {
-          await entry.close()
-        }
-        throw error
-      }
+      const result = await this.readTask(entry, (client) => (
+        queryClient(spec, client, sql, maxRows, spec.timeoutMs, entry.readOnly)
+      ))
+      return { ...result, elapsedMs: Date.now() - started }
     })
   }
 
@@ -250,8 +333,7 @@ export class Registry {
     const spec = await this.spec(id)
     const entry = await this.entryFor(spec, true)
     return entry.run(async () => {
-      const client = await this.clientOf(entry)
-      return { rows: await listTables(spec, client, schema) }
+      return { rows: await this.readTask(entry, (client) => listTables(spec, client, schema)) }
     })
   }
 
@@ -260,8 +342,7 @@ export class Registry {
     const spec = await this.spec(id)
     const entry = await this.entryFor(spec, true)
     return entry.run(async () => {
-      const client = await this.clientOf(entry)
-      return { rows: await listFields(spec, client, schema, table) }
+      return { rows: await this.readTask(entry, (client) => listFields(spec, client, schema, table)) }
     })
   }
 
@@ -389,6 +470,9 @@ async function damengRun(client, sql, params, options = {}) {
     try {
       await client.execute('SET TRANSACTION READ ONLY')
     } catch (error) {
+      // 断连时把原始错误原样抛出：包装成「无法切只读事务」会把「连接已经关闭」
+      // 这条关键信息吃掉，上层就判不出连接已死，也就不会重连。
+      if (isConnectionClosed(error)) throw error
       throw new Error(
         '无法把达梦连接切到只读事务，已拒绝执行查询：'
         + (error instanceof Error ? error.message : String(error)),
